@@ -12,9 +12,9 @@ use crate::tap_device;
 use crate::{encode, proto_enum, try_parse};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct EtherAddress(pub [u8; 6]);
+pub struct Address(pub [u8; 6]);
 
-impl Display for EtherAddress {
+impl Display for Address {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
         for (i, part) in self.0.iter().enumerate() {
             write!(f, "{:02x}", part)?;
@@ -27,11 +27,11 @@ impl Display for EtherAddress {
     }
 }
 
-pub fn ether_address<'a>(input: &'a [u8]) -> BIResult<'a, EtherAddress> {
-    take(6 as usize)(input).map(|(i, x)| (i, EtherAddress(x.try_into().unwrap())))
+pub fn address<'a>(input: &'a [u8]) -> BIResult<'a, Address> {
+    take(6 as usize)(input).map(|(i, x)| (i, Address(x.try_into().unwrap())))
 }
 
-impl EncodeTo for EtherAddress {
+impl EncodeTo for Address {
     fn encoded_len(&self) -> usize {
         6
     }
@@ -41,25 +41,25 @@ impl EncodeTo for EtherAddress {
     }
 }
 
-proto_enum!(EtherType, u16, {
+proto_enum!(Type, u16, {
     Arp = 0x0806,
     Ipv4 = 0x0800,
     Ipv6 = 0x86DD,
 });
 
 #[derive(Debug, PartialEq)]
-pub struct EtherFrame {
-    pub dest: EtherAddress,
-    pub src: EtherAddress,
-    pub ethertype: EtherType,
+pub struct Frame {
+    pub dest: Address,
+    pub src: Address,
+    pub ethertype: Type,
     pub payload: Vec<u8>,
 }
 
-impl Display for EtherFrame {
+impl Display for Frame {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(
             f,
-            "From: {}, To: {}, Ethertype: {}\n{}",
+            "From: {}, To: {}, type: {}\n{}",
             self.src,
             self.dest,
             self.ethertype,
@@ -70,7 +70,7 @@ impl Display for EtherFrame {
     }
 }
 
-impl EtherFrame {
+impl Frame {
     pub fn encode(&self) -> Vec<u8> {
         let mut result = encode!(self.dest, self.src, self.ethertype as u16);
 
@@ -84,16 +84,16 @@ impl EtherFrame {
     }
 }
 
-pub fn ether_frame<'a>(input: &'a [u8]) -> AHResult<EtherFrame> {
+pub fn frame<'a>(input: &'a [u8]) -> AHResult<Frame> {
     try_parse!(
         {
-            let (input, dest) = ether_address(input)?;
-            let (input, src) = ether_address(input)?;
-            let (input, ethertype) = map_res(be_u16, EtherType::try_from)(input)?;
+            let (input, dest) = address(input)?;
+            let (input, src) = address(input)?;
+            let (input, ethertype) = map_res(be_u16, Type::try_from)(input)?;
 
             Ok((
                 input,
-                EtherFrame {
+                Frame {
                     dest,
                     src,
                     ethertype,
@@ -105,24 +105,24 @@ pub fn ether_frame<'a>(input: &'a [u8]) -> AHResult<EtherFrame> {
     )
 }
 
-impl DispatchKeyed for EtherFrame {
-    type Key = EtherType;
+impl DispatchKeyed for Frame {
+    type Key = Type;
 
     fn dispatch_key(&self) -> Self::Key {
         self.ethertype
     }
 }
 
-pub struct TapEthernetInterface {
+pub struct TapInterface {
     tap_dev: Arc<RwLock<tap_device::TapDevice>>,
-    recv_map: Arc<RecvSenderMap<EtherFrame>>,
-    write_sender: channel::Sender<EtherFrame>,
-    write_receiver: channel::Receiver<EtherFrame>,
+    recv_map: Arc<RecvSenderMap<Frame>>,
+    write_sender: channel::Sender<Frame>,
+    write_receiver: channel::Receiver<Frame>,
     write_alert_read_fd: unix_io::RawFd,
     write_alert_write_fd: unix_io::RawFd,
 }
 
-impl TapEthernetInterface {
+impl TapInterface {
     pub fn open() -> AHResult<Self> {
         let tap_dev = tap_device::TapDevice::open()?;
 
@@ -166,7 +166,7 @@ impl TapEthernetInterface {
 
                 if fd_set.contains(tap_dev_fd) {
                     let num_read = tap_dev.write().unwrap().read(&mut buffer).unwrap();
-                    let frame = ether_frame(&buffer[..num_read])
+                    let frame = frame(&buffer[..num_read])
                         .map_err(|e| anyhow!("parsing ethernet frame failed: {}", e.to_string()))
                         .unwrap();
 
@@ -193,25 +193,25 @@ impl TapEthernetInterface {
     }
 }
 
-impl KeyedDispatcher for TapEthernetInterface {
-    type Item = EtherFrame;
+impl KeyedDispatcher for TapInterface {
+    type Item = Frame;
 
-    fn recv_map(&self) -> &RecvSenderMap<EtherFrame> {
+    fn recv_map(&self) -> &RecvSenderMap<Frame> {
         &self.recv_map
     }
 }
 
-pub trait EthernetServer: KeyedDispatcher<Item = EtherFrame> {
-    fn if_hwaddr(&self) -> AHResult<EtherAddress>;
-    fn writer(&self) -> crossbeam::channel::Sender<EtherFrame>;
+pub trait Server: KeyedDispatcher<Item = Frame> {
+    fn if_hwaddr(&self) -> AHResult<Address>;
+    fn writer(&self) -> crossbeam::channel::Sender<Frame>;
 }
 
-impl EthernetServer for TapEthernetInterface {
-    fn if_hwaddr(&self) -> AHResult<EtherAddress> {
-        Ok(EtherAddress(self.tap_dev.read().unwrap().if_hwaddr()?))
+impl Server for TapInterface {
+    fn if_hwaddr(&self) -> AHResult<Address> {
+        Ok(Address(self.tap_dev.read().unwrap().if_hwaddr()?))
     }
 
-    fn writer(&self) -> crossbeam::channel::Sender<EtherFrame> {
+    fn writer(&self) -> crossbeam::channel::Sender<Frame> {
         let mut write_alert_write = unsafe {
             <std::fs::File as unix_io::FromRawFd>::from_raw_fd(self.write_alert_write_fd)
         };
@@ -236,11 +236,11 @@ mod tests {
     #[test]
     fn frame_decodes() {
         assert_eq!(
-            ether_frame(b"123456abcdef\x08\x00payload").unwrap(),
-            EtherFrame {
-                dest: EtherAddress(*b"123456"),
-                src: EtherAddress(*b"abcdef"),
-                ethertype: EtherType::Ipv4,
+            frame(b"123456abcdef\x08\x00payload").unwrap(),
+            Frame {
+                dest: Address(*b"123456"),
+                src: Address(*b"abcdef"),
+                ethertype: Type::Ipv4,
                 payload: b"payload".to_vec(),
             }
         );

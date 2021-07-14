@@ -5,16 +5,16 @@ use std::thread;
 use super::utils::KeyedDispatcher;
 use super::{ipv4, ipv6};
 
-pub struct UdpServer {
-    ipv6_receiver: channel::Receiver<ipv6::Ipv6Packet>,
+pub struct Server {
+    ipv6_receiver: channel::Receiver<ipv6::Packet>,
 }
 
-impl UdpServer {
-    pub fn new(ipv6_server: &mut ipv6::Ipv6Server) -> AHResult<Self> {
+impl Server {
+    pub fn new(ipv6_server: &mut ipv6::Server) -> AHResult<Self> {
         let (ipv6_sender, ipv6_receiver) = channel::bounded(1024);
 
         ipv6_server.register(
-            ipv6::Ipv6NextHeader::Protocol(ipv4::IpProtocolNumber::Udp),
+            ipv6::NextHeader::Protocol(ipv4::ProtocolNumber::Udp),
             ipv6_sender,
         );
 

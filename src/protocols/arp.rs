@@ -13,25 +13,25 @@ use super::utils::EncodeTo;
 use super::{ether, ipv4};
 use crate::{encode, proto_enum, try_parse};
 
-proto_enum!(ArpPacketOpcode, u16, {
+proto_enum!(PacketOpcode, u16, {
     Request = 1,
     Reply = 2,
 });
 
 #[derive(Debug, PartialEq)]
-pub struct ArpPacket {
-    pub opcode: ArpPacketOpcode,
-    pub src_ether: ether::EtherAddress,
-    pub src_ipv4: ipv4::Ipv4Address,
-    pub dest_ether: ether::EtherAddress,
-    pub dest_ipv4: ipv4::Ipv4Address,
+pub struct Packet {
+    pub opcode: PacketOpcode,
+    pub src_ether: ether::Address,
+    pub src_ipv4: ipv4::Address,
+    pub dest_ether: ether::Address,
+    pub dest_ipv4: ipv4::Address,
 }
 
-impl ArpPacket {
+impl Packet {
     pub fn encode(&self) -> Vec<u8> {
         encode!(
             1u16,
-            ether::EtherType::Ipv4 as u16,
+            ether::Type::Ipv4 as u16,
             6u8,
             4u8,
             self.opcode as u16,
@@ -43,22 +43,22 @@ impl ArpPacket {
     }
 }
 
-pub fn arp_packet(input: &[u8]) -> AHResult<ArpPacket> {
+pub fn packet(input: &[u8]) -> AHResult<Packet> {
     try_parse!(
         {
             let (input, _) = verify(be_u16, |hrd| *hrd == 1)(input)?;
-            let (input, _) = verify(be_u16, |pro| *pro == ether::EtherType::Ipv4 as u16)(input)?;
+            let (input, _) = verify(be_u16, |pro| *pro == ether::Type::Ipv4 as u16)(input)?;
             let (input, _) = verify(be_u8, |hln| *hln == 6)(input)?;
             let (input, _) = verify(be_u8, |pln| *pln == 4)(input)?;
-            let (input, opcode) = map_res(be_u16, ArpPacketOpcode::try_from)(input)?;
-            let (input, src_ether) = ether::ether_address(input)?;
-            let (input, src_ipv4) = ipv4::ipv4_address(input)?;
-            let (input, dest_ether) = ether::ether_address(input)?;
-            let (input, dest_ipv4) = ipv4::ipv4_address(input)?;
+            let (input, opcode) = map_res(be_u16, PacketOpcode::try_from)(input)?;
+            let (input, src_ether) = ether::address(input)?;
+            let (input, src_ipv4) = ipv4::address(input)?;
+            let (input, dest_ether) = ether::address(input)?;
+            let (input, dest_ipv4) = ipv4::address(input)?;
 
             Ok((
                 input,
-                ArpPacket {
+                Packet {
                     opcode,
                     src_ether,
                     src_ipv4,
@@ -71,17 +71,17 @@ pub fn arp_packet(input: &[u8]) -> AHResult<ArpPacket> {
     )
 }
 
-pub struct ArpServer {
-    receiver: channel::Receiver<ether::EtherFrame>,
-    write_sender: channel::Sender<ether::EtherFrame>,
-    ether_address: ether::EtherAddress,
-    addresses: Arc<RwLock<HashSet<ipv4::Ipv4Address>>>,
+pub struct Server {
+    receiver: channel::Receiver<ether::Frame>,
+    write_sender: channel::Sender<ether::Frame>,
+    ether_address: ether::Address,
+    addresses: Arc<RwLock<HashSet<ipv4::Address>>>,
 }
 
-impl ArpServer {
-    pub fn new(interface: &mut impl ether::EthernetServer) -> AHResult<Self> {
+impl Server {
+    pub fn new(interface: &mut impl ether::Server) -> AHResult<Self> {
         let (sender, receiver) = channel::bounded(1024);
-        interface.register(ether::EtherType::Arp, sender);
+        interface.register(ether::Type::Arp, sender);
 
         Ok(Self {
             receiver,
@@ -100,15 +100,15 @@ impl ArpServer {
         thread::spawn(move || loop {
             let frame = receiver.recv().unwrap();
 
-            let packet = arp_packet(&frame.payload).unwrap();
+            let packet = packet(&frame.payload).unwrap();
 
             if addresses.read().unwrap().contains(&packet.dest_ipv4) {
-                let frame = ether::EtherFrame {
+                let frame = ether::Frame {
                     dest: packet.src_ether,
                     src: src_ether,
-                    ethertype: ether::EtherType::Arp,
-                    payload: ArpPacket {
-                        opcode: ArpPacketOpcode::Reply,
+                    ethertype: ether::Type::Arp,
+                    payload: Packet {
+                        opcode: PacketOpcode::Reply,
                         src_ether,
                         src_ipv4: packet.dest_ipv4,
                         dest_ether: packet.src_ether,
@@ -122,7 +122,7 @@ impl ArpServer {
         });
     }
 
-    pub fn add(&self, address: ipv4::Ipv4Address) {
+    pub fn add(&self, address: ipv4::Address) {
         self.addresses.write().unwrap().insert(address);
     }
 }
@@ -138,16 +138,16 @@ mod tests {
     #[test]
     fn reply_packet_decodes() {
         assert_eq!(
-            arp_packet(&hexstring(
+            packet(&hexstring(
                 "0001080006040001000af56dbc840a0001eb0000000000000a000002"
             ))
             .unwrap(),
-            ArpPacket {
-                opcode: ArpPacketOpcode::Request,
-                src_ether: ether::EtherAddress([0, 10, 245, 109, 188, 132]),
-                src_ipv4: ipv4::Ipv4Address([10, 0, 1, 235]),
-                dest_ether: ether::EtherAddress([0, 0, 0, 0, 0, 0]),
-                dest_ipv4: ipv4::Ipv4Address([10, 0, 0, 2]),
+            Packet {
+                opcode: PacketOpcode::Request,
+                src_ether: ether::Address([0, 10, 245, 109, 188, 132]),
+                src_ipv4: ipv4::Address([10, 0, 1, 235]),
+                dest_ether: ether::Address([0, 0, 0, 0, 0, 0]),
+                dest_ipv4: ipv4::Address([10, 0, 0, 2]),
             }
         );
     }
@@ -155,16 +155,16 @@ mod tests {
     #[test]
     fn request_packet_decodes() {
         assert_eq!(
-            arp_packet(&hexstring(
+            packet(&hexstring(
                 "0001080006040002b827ebb38fcf0a00012204d9f5f844e80a000168"
             ))
             .unwrap(),
-            ArpPacket {
-                opcode: ArpPacketOpcode::Reply,
-                src_ether: ether::EtherAddress([184, 39, 235, 179, 143, 207]),
-                src_ipv4: ipv4::Ipv4Address([10, 0, 1, 34]),
-                dest_ether: ether::EtherAddress([4, 217, 245, 248, 68, 232]),
-                dest_ipv4: ipv4::Ipv4Address([10, 0, 1, 104]),
+            Packet {
+                opcode: PacketOpcode::Reply,
+                src_ether: ether::Address([184, 39, 235, 179, 143, 207]),
+                src_ipv4: ipv4::Address([10, 0, 1, 34]),
+                dest_ether: ether::Address([4, 217, 245, 248, 68, 232]),
+                dest_ipv4: ipv4::Address([10, 0, 1, 104]),
             }
         );
     }

@@ -66,6 +66,19 @@ macro_rules! proto_enum_with_unknown {
                 }
             }
         }
+
+        impl crate::protocols::utils::EncodeTo for $name {
+            fn encoded_len(&self) -> usize {
+                std::mem::size_of::<$type>()
+            }
+
+            fn encode_to(&self, buf: &mut [u8]) {
+                match self {
+                    $( $name::$variant_name => $variant_disc, )+
+                    $name::Unknown(value) => *value
+                }.encode_to(buf)
+            }
+        }
     };
 }
 
@@ -131,6 +144,26 @@ impl EncodeTo for u16 {
 
     fn encode_to(&self, buf: &mut [u8]) {
         NetworkEndian::write_u16(buf, *self);
+    }
+}
+
+impl EncodeTo for u32 {
+    fn encoded_len(&self) -> usize {
+        4
+    }
+
+    fn encode_to(&self, buf: &mut [u8]) {
+        NetworkEndian::write_u32(buf, *self);
+    }
+}
+
+impl EncodeTo for &[u8] {
+    fn encoded_len(&self) -> usize {
+        self.len()
+    }
+
+    fn encode_to(&self, buf: &mut [u8]) {
+        (&mut buf[..self.len()]).copy_from_slice(self);
     }
 }
 
