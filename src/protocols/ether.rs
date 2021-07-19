@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result as AHResult};
+use anyhow::{anyhow, bail, Context, Result as AHResult};
 use crossbeam::channel;
 use nom::{bytes::complete::take, combinator::map_res, number::complete::be_u16};
 use std::convert::{TryFrom, TryInto};
@@ -24,6 +24,31 @@ impl Display for Address {
         }
 
         Ok(())
+    }
+}
+
+impl std::str::FromStr for Address {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> AHResult<Self> {
+        let parts: Vec<_> = s.split(":").collect();
+
+        if parts.len() != 6 {
+            bail!("expected 6 parts");
+        }
+
+        let result = parts
+            .iter()
+            .map(|p| {
+                if p.len() != 2 {
+                    bail!("each part must be two digits");
+                } else {
+                    u8::from_str_radix(p, 16).context("each part must be hex")
+                }
+            })
+            .collect::<AHResult<Vec<_>>>()?;
+
+        Ok(Self(result.try_into().unwrap()))
     }
 }
 
@@ -114,6 +139,7 @@ impl DispatchKeyed for Frame {
 }
 
 pub struct TapInterface {
+    hw_address: Address,
     tap_dev: Arc<RwLock<tap_device::TapDevice>>,
     recv_map: Arc<RecvSenderMap<Frame>>,
     write_sender: channel::Sender<Frame>,
@@ -123,7 +149,7 @@ pub struct TapInterface {
 }
 
 impl TapInterface {
-    pub fn open() -> AHResult<Self> {
+    pub fn open(hw_address: Address) -> AHResult<Self> {
         let tap_dev = tap_device::TapDevice::open()?;
 
         let (write_sender, write_receiver) = channel::bounded(1024);
@@ -131,6 +157,7 @@ impl TapInterface {
         let (write_alert_read_fd, write_alert_write_fd) = nix::unistd::pipe()?;
 
         Ok(Self {
+            hw_address,
             tap_dev: Arc::new(RwLock::new(tap_dev)),
             recv_map: Arc::new(RecvSenderMap::new()),
             write_sender,
@@ -208,7 +235,7 @@ pub trait Server: KeyedDispatcher<Item = Frame> {
 
 impl Server for TapInterface {
     fn if_hwaddr(&self) -> AHResult<Address> {
-        Ok(Address(self.tap_dev.read().unwrap().if_hwaddr()?))
+        Ok(self.hw_address)
     }
 
     fn writer(&self) -> crossbeam::channel::Sender<Frame> {

@@ -19,6 +19,8 @@ use super::ipv4;
 use super::utils::{BIResult, DispatchKeyed, EncodeTo, KeyedDispatcher, RecvSenderMap, SIResult};
 use crate::try_parse;
 
+const MULTICAST_ALL_NODES: Address = Address([0xff01, 0, 0, 0, 0, 0, 0, 0x1]);
+
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 pub enum NextHeader {
     Protocol(ipv4::ProtocolNumber),
