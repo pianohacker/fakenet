@@ -9,7 +9,7 @@ use std::convert::TryFrom;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use super::utils::EncodeTo;
+use super::encdec::EncodeTo;
 use super::{ether, ipv4};
 use crate::{encode, proto_enum, try_parse};
 

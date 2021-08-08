@@ -1,9 +1,7 @@
 [package]
+edition = "2018"
 name = "fakenet"
 version = "0.1.0"
-edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0.41"
@@ -14,7 +12,9 @@ libc = "0.2.97"
 nix = "0.21.0"
 nom = "6.1.2"
 ouroboros = "0.9.3"
-serde = { version = "1.0", features = ["derive"] }
+rand = "0.8"
+serde = { "version" = "1.0", features = ["derive"] }
+serde_json = "1.0.64"
 toml = "0.5.8"
 
 [dev-dependencies]

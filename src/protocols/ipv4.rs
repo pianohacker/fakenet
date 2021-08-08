@@ -11,7 +11,7 @@ use std::convert::TryInto;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use super::utils::{BIResult, EncodeTo, SIResult};
+use super::encdec::{BIResult, EncodeTo, SIResult};
 use crate::{proto_enum_with_unknown, try_parse};
 
 // Ref: https://www.iana.org/assignments/protocol-numbers/protocol-numbers.xhtml

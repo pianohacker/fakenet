@@ -1,5 +1,7 @@
 use anyhow::{anyhow, bail, Result as AHResult};
+use byteorder::ByteOrder;
 use nom::{
+    bytes::complete::take,
     combinator::{consumed, eof, map_res},
     multi::many0,
     number::complete::be_u8,
@@ -7,11 +9,11 @@ use nom::{
 };
 use std::convert::TryFrom;
 
+use crate::protocols::encdec::{BIResult, EncodeTo};
 use crate::protocols::ether;
 use crate::protocols::ipv4;
 use crate::protocols::ipv6;
-use crate::protocols::utils::{BIResult, EncodeTo};
-use crate::{encode, proto_enum_with_unknown, try_parse};
+use crate::{encode, encode_to, proto_enum_with_unknown, try_parse};
 
 // Ref: https://datatracker.ietf.org/doc/html/rfc4443
 
@@ -39,7 +41,33 @@ proto_enum_with_unknown!(NeighborSolicitationOptionType, u8, {
 pub enum NeighborSolicitationOption {
     SourceLinkLayerAddress(ether::Address),
     TargetLinkLayerAddress(ether::Address),
-    Nonce,
+    Nonce(Vec<u8>),
+}
+
+impl EncodeTo for NeighborSolicitationOption {
+    fn encoded_len(&self) -> usize {
+        match self {
+            NeighborSolicitationOption::Nonce(nonce) => 2 + nonce.len(),
+            _ => {
+                todo!("unsupported option: {:?}", self)
+            }
+        }
+    }
+    fn encode_to(&self, buf: &mut [u8]) {
+        match self {
+            NeighborSolicitationOption::Nonce(nonce) => {
+                encode_to!(
+                    buf,
+                    NeighborSolicitationOptionType::Nonce,
+                    ((nonce.len() + 2) as f64 / 8f64).ceil() as u8,
+                    nonce
+                );
+            }
+            _ => {
+                todo!("unsupported option: {:?}", self)
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -54,6 +82,37 @@ pub enum Packet {
         options: Vec<NeighborSolicitationOption>,
     },
     V2MulticastListenerReport,
+}
+
+impl Packet {
+    /// Encode this packet.
+    ///
+    /// The length field in pseudo_header is ignored, and should be set to 0.
+    pub fn encode(&self, pseudo_header: PseudoHeader) -> Vec<u8> {
+        let mut buffer: Vec<u8> = match self {
+            Packet::NeighborSolicitation { dest, options } => encode!(
+                Type::NeighborSolicitation,
+                0u8,  // Code
+                0u16, // Checksum
+                0u32, // Reserved
+                dest,
+                options,
+            ),
+            _ => {
+                todo!("unimplemented icmpv6 option type: {:?}", self)
+            }
+        };
+
+        let updated_pseudo_header = PseudoHeader {
+            length: buffer.len() as u32,
+            ..pseudo_header
+        };
+        let checksum = packet_checksum(&buffer, &updated_pseudo_header);
+        byteorder::NetworkEndian::write_u16(&mut buffer[2..4], checksum);
+        assert!(packet_checksum(&buffer, &updated_pseudo_header) == 0x0000);
+
+        buffer
+    }
 }
 
 fn neighbor_solicitation_option<'a>(input: &'a [u8]) -> BIResult<'a, NeighborSolicitationOption> {
@@ -79,9 +138,9 @@ fn neighbor_solicitation_option<'a>(input: &'a [u8]) -> BIResult<'a, NeighborSol
                 ))
             }
             NeighborSolicitationOptionType::Nonce => {
-                let input = &input[(length as usize * 8) - 2..];
+                let (input, nonce) = take((length as usize * 8) - 2)(input)?;
 
-                Ok((input, NeighborSolicitationOption::Nonce))
+                Ok((input, NeighborSolicitationOption::Nonce(nonce.to_vec())))
             }
             NeighborSolicitationOptionType::Unknown(t) => {
                 todo!("not yet implemented: {}", t)
@@ -131,7 +190,8 @@ pub struct PseudoHeader {
     pub length: u32,
 }
 
-fn packet_checksum(input: &[u8], pseudo_header: PseudoHeader) -> u16 {
+fn packet_checksum(input: &[u8], pseudo_header: &PseudoHeader) -> u16 {
+    // RFC 8200 § 8.1
     let checksummed_buffer = encode!(
         pseudo_header.src,
         pseudo_header.dest,
@@ -142,23 +202,25 @@ fn packet_checksum(input: &[u8], pseudo_header: PseudoHeader) -> u16 {
         input,
     );
 
-    let mut checksum = 0u16;
+    // RFC 4333 § 2.3
+    let mut checksum = 0u32;
 
     for i in (0..checksummed_buffer.len()).step_by(2) {
-        let word = (checksummed_buffer[i] as u16) << 8 | (checksummed_buffer[i + 1] as u16);
-
-        let (new_checksum, overflowed) = checksum.overflowing_add(word);
-
-        checksum = new_checksum + if overflowed { 1 } else { 0 };
+        checksum += (checksummed_buffer[i] as u32) << 8 | (checksummed_buffer[i + 1] as u32);
     }
 
-    checksum
+    // Fold in carry repeatedly until nothing is left
+    while checksum > 0xffff {
+        checksum = (checksum & 0xffff) + (checksum >> 16);
+    }
+
+    !(checksum as u16)
 }
 
 pub fn packet(input: &[u8], pseudo_header: PseudoHeader) -> AHResult<Packet> {
-    let checksum = packet_checksum(input, pseudo_header);
+    let checksum = packet_checksum(input, &pseudo_header);
 
-    if checksum != 0xffff {
+    if checksum != 0x0000 {
         bail!("icmpv6 checksum invalid: {:x}", checksum);
     }
 
@@ -232,17 +294,17 @@ mod tests {
     fn neighbor_solicitation_packet_with_nonce_decodes() {
         assert_eq!(
             packet(
-                &hexstring("870003aa00000000fe80000000000000396df66497e164f30e01d8d14717f0a0"),
+                &hexstring("870003ca00000000fe80000000000000396df66497e164f30e01d8d14717f0a0"),
                 PseudoHeader {
                     dest: "fe80::396d:f664:97e1:64f3".parse().unwrap(),
                     src: "::".parse().unwrap(),
-                    length: 64
+                    length: 32
                 }
             )
             .unwrap(),
             Packet::NeighborSolicitation {
                 dest: "fe80::396d:f664:97e1:64f3".parse().unwrap(),
-                options: vec![NeighborSolicitationOption::Nonce,],
+                options: vec![NeighborSolicitationOption::Nonce(hexstring("d8d14717f0a0"))],
             },
         );
     }
@@ -298,6 +360,22 @@ mod tests {
             )
             .unwrap(),
             Packet::V2MulticastListenerReport
+        );
+    }
+
+    #[test]
+    fn neighbor_solicitation_packet_with_nonce_encodes() {
+        assert_eq!(
+            Packet::NeighborSolicitation {
+                dest: "fe80::396d:f664:97e1:64f3".parse().unwrap(),
+                options: vec![NeighborSolicitationOption::Nonce(hexstring("d8d14717f0a0")),],
+            }
+            .encode(PseudoHeader {
+                dest: "fe80::396d:f664:97e1:64f3".parse().unwrap(),
+                src: "::".parse().unwrap(),
+                length: 0
+            }),
+            hexstring("870003ca00000000fe80000000000000396df66497e164f30e01d8d14717f0a0"),
         );
     }
 }

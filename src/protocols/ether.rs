@@ -7,7 +7,8 @@ use std::os::unix::io as unix_io;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use super::utils::{hexdump, BIResult, DispatchKeyed, EncodeTo, KeyedDispatcher, RecvSenderMap};
+use super::encdec::{hexdump, BIResult, EncodeTo};
+use super::utils::{DispatchKeyed, KeyedDispatcher, RecvSenderMap};
 use crate::tap_device;
 use crate::{encode, proto_enum, try_parse};
 
@@ -248,6 +249,7 @@ impl Server for TapInterface {
 
         thread::spawn(move || loop {
             let frame = alerter_receiver.recv().unwrap();
+            eprintln!("Sending: {}", &frame);
             sender.send(frame).unwrap();
             <std::fs::File as std::io::Write>::write(&mut write_alert_write, &[1u8]).unwrap();
         });
