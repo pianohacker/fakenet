@@ -31,6 +31,18 @@ macro_rules! proto_enum {
                 })
             }
         }
+
+        impl crate::protocols::encdec::EncodeTo for $name {
+            fn encoded_len(&self) -> usize {
+                std::mem::size_of::<$type>()
+            }
+
+            fn encode_to(&self, buf: &mut [u8]) {
+                match self {
+                    $( $name::$variant_name => $variant_disc as $type, )+
+                }.encode_to(buf)
+            }
+        }
     };
 }
 
@@ -192,7 +204,7 @@ impl<T: EncodeTo> EncodeTo for Vec<T> {
 macro_rules! encode_to {
     ( $buf:expr, $($val:expr $(,)?)+ ) => {
         {
-            let mut buf = $buf;
+            let mut buf = $buf.as_mut();
             $(
                 $val.encode_to(&mut buf);
                 buf = &mut buf[$val.encoded_len()..];
@@ -230,4 +242,30 @@ macro_rules! try_parse {
             }
         }
     };
+}
+
+pub fn round_up_to_next<
+    T: Copy + std::ops::Rem<Output = T> + std::ops::Add<Output = T> + std::ops::Sub<Output = T>,
+>(
+    val: T,
+    step: T,
+) -> T {
+    val + (step - val % step) % step
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_up_to_next_preserves_multiples() {
+        assert_eq!(round_up_to_next(8, 8), 8);
+        assert_eq!(round_up_to_next(63, 9), 63);
+    }
+
+    #[test]
+    fn round_up_to_next_returns_multiples() {
+        assert_eq!(round_up_to_next(15, 8), 16);
+        assert_eq!(round_up_to_next(60, 9), 63);
+    }
 }

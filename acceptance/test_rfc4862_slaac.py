@@ -760,7 +760,13 @@ def assert_is_link_local_address_5_3(address):
 #    Neighbor Advertisements from other nodes already using the address;
 #    the latter ensures that two nodes attempting to use the same address
 #    simultaneously should detect each other's presence.
-#
+
+def test_5_4_2(iface):
+	mld_packet = iface.assert_packet(lambda p: 'IPv6ExtHdrHopByHop' in p and p[IPv6ExtHdrHopByHop].nh == 58 and 'ICMPv6MLReport2' in p)
+
+	assert(mld_packet[IPv6].dst == 'ff02::16')
+	assert(any(r.dst == 'ff02::1' for r in mld_packet.records))
+
 #    To check an address, a node sends DupAddrDetectTransmits Neighbor
 #    Solicitations, each separated by RetransTimer milliseconds.  The
 #    solicitation's Target Address is set to the address being checked,
@@ -768,11 +774,12 @@ def assert_is_link_local_address_5_3(address):
 #    destination is set to the solicited-node multicast address of the
 #    target address.
 
-def test_5_4_2(iface):
-	packet = iface.assert_packet(lambda p: p.nh == 58 and 'ICMPv6ND_NS' in p)
-	assert_is_link_local_address_5_3(packet[ICMPv6ND_NS].tgt)
-	rfc4291_addr_arch.assert_is_solicited_nodes_for_address(packet[IPv6].dst, packet[ICMPv6ND_NS].tgt)
-	rfc2464_ether_ipv6.assert_is_multicast_ether_dest(packet[Ether].dst, packet[IPv6].dst)
+	ns_packet = iface.assert_packet(lambda p: p.nh == 58 and 'ICMPv6ND_NS' in p)
+
+	assert(any(rfc4291_addr_arch.is_solicited_nodes_for_address(r.dst, ns_packet[ICMPv6ND_NS].tgt) for r in mld_packet.records[0].iterpayloads()))
+	assert_is_link_local_address_5_3(ns_packet[ICMPv6ND_NS].tgt)
+	assert(rfc4291_addr_arch.is_solicited_nodes_for_address(ns_packet[IPv6].dst, ns_packet[ICMPv6ND_NS].tgt))
+	rfc2464_ether_ipv6.assert_is_multicast_ether_dest(ns_packet[Ether].dst, ns_packet[IPv6].dst)
 
 #    If the Neighbor Solicitation is going to be the first message sent
 #    from an interface after interface (re)initialization, the node SHOULD

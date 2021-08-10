@@ -13,7 +13,7 @@ use crate::protocols::encdec::{BIResult, EncodeTo};
 use crate::protocols::ether;
 use crate::protocols::ipv4;
 use crate::protocols::ipv6;
-use crate::{encode, encode_to, proto_enum_with_unknown, try_parse};
+use crate::{encode, encode_to, proto_enum, proto_enum_with_unknown, try_parse};
 
 // Ref: https://datatracker.ietf.org/doc/html/rfc4443
 
@@ -27,7 +27,7 @@ proto_enum_with_unknown!(Type, u8, {
     RouterSolicitation = 133,
     NeighborSolicitation = 135,
     NeighborAdvertisement = 136,
-    V2MulticastListenerReport = 143,
+    MldV2Report = 143,
 });
 
 // Ref: https://datatracker.ietf.org/doc/html/rfc4861
@@ -70,6 +70,36 @@ impl EncodeTo for NeighborSolicitationOption {
     }
 }
 
+proto_enum!(Mldv2AddressRecordType, u8, {
+    CodeIsInclude = 1,
+    CodeIsExclude = 2,
+    ChangeToIncludeMode = 3,
+    ChangeToExcludeMode = 4,
+    CllowNewSources = 5,
+    ClockOldSources = 6,
+});
+
+#[derive(Debug, PartialEq)]
+pub struct MldV2AddressRecord {
+    pub record_type: Mldv2AddressRecordType,
+    pub address: ipv6::Address,
+}
+
+impl EncodeTo for MldV2AddressRecord {
+    fn encoded_len(&self) -> usize {
+        1 + 1 + 2 + 16
+    }
+    fn encode_to(&self, buf: &mut [u8]) {
+        encode_to!(
+            buf,
+            self.record_type,
+            0u8,
+            0u16, // Number of Sources
+            self.address
+        );
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Packet {
     RouterSolicitation,
@@ -81,7 +111,7 @@ pub enum Packet {
         src: ipv6::Address,
         options: Vec<NeighborSolicitationOption>,
     },
-    V2MulticastListenerReport,
+    MldV2Report(Vec<MldV2AddressRecord>),
 }
 
 impl Packet {
@@ -97,6 +127,14 @@ impl Packet {
                 0u32, // Reserved
                 dest,
                 options,
+            ),
+            Packet::MldV2Report(records) => encode!(
+                Type::MldV2Report,
+                0u8,  // Reserved
+                0u16, // Checksum
+                0u16, // Reserved
+                records.len() as u16,
+                records,
             ),
             _ => {
                 todo!("unimplemented icmpv6 option type: {:?}", self)
@@ -175,6 +213,7 @@ fn neighbor_solicitation_packet<'a>(input: &'a [u8]) -> BIResult<'a, Packet> {
 fn neighbor_advertisement_packet<'a>(input: &'a [u8]) -> BIResult<'a, Packet> {
     // ignore code, checksum, and reserved
     let input = &input[7..];
+
     let (input, src) = ipv6::address(input)?;
 
     let (input, options) = terminated(many0(neighbor_solicitation_option), eof)(input)?;
@@ -182,6 +221,34 @@ fn neighbor_advertisement_packet<'a>(input: &'a [u8]) -> BIResult<'a, Packet> {
     let (input, _) = eof(input)?;
 
     Ok((input, Packet::NeighborAdvertisement { src, options }))
+}
+
+fn mld_v2_address_record<'a>(input: &'a [u8]) -> BIResult<'a, MldV2AddressRecord> {
+    let (input, record_type) = map_res(be_u8, Mldv2AddressRecordType::try_from)(input)?;
+
+    // TODO: Aux Data Len, Number of Sources
+    let input = &input[3..];
+
+    let (input, address) = ipv6::address(input)?;
+
+    Ok((
+        input,
+        MldV2AddressRecord {
+            record_type,
+            address,
+        },
+    ))
+}
+
+fn mld_v2_report_packet<'a>(input: &'a [u8]) -> BIResult<'a, Packet> {
+    // ignore code, checksum, and number of records
+    let input = &input[7..];
+
+    let (input, records) = terminated(many0(mld_v2_address_record), eof)(input)?;
+
+    let (input, _) = eof(input)?;
+
+    Ok((input, Packet::MldV2Report(records)))
 }
 
 pub struct PseudoHeader {
@@ -233,7 +300,7 @@ pub fn packet(input: &[u8], pseudo_header: PseudoHeader) -> AHResult<Packet> {
                 RouterSolicitation => (input, Packet::RouterSolicitation),
                 NeighborSolicitation => neighbor_solicitation_packet(input)?,
                 NeighborAdvertisement => neighbor_advertisement_packet(input)?,
-                V2MulticastListenerReport => (input, Packet::V2MulticastListenerReport),
+                MldV2Report => mld_v2_report_packet(input)?,
                 _ => {
                     todo!("not yet implemented: {:?}", packet_type)
                 }
@@ -334,33 +401,41 @@ mod tests {
     fn multicast_listener_packet_decodes() {
         assert_eq!(
             packet(
-                &hexstring("8f008dae0000000104000000ff0200000000000000000001fff9e0c6"),
+                &hexstring("8f002b5a0000000204000000ff05000000000000000000000001000304000000ff020000000000000000000000010002"),
                 PseudoHeader {
                     dest: "ff02::16".parse().unwrap(),
-                    src: "::".parse().unwrap(),
-                    length: 56
+                    src: "fe80::a00:27ff:fed4:10bb".parse().unwrap(),
+                    length: 48
                 }
             )
             .unwrap(),
-            Packet::V2MulticastListenerReport
+            Packet::MldV2Report(
+                vec![
+                    MldV2AddressRecord {
+                        record_type: Mldv2AddressRecordType::ChangeToExcludeMode,
+                        address: "ff05::1:3".parse().unwrap(),
+                    },
+                    MldV2AddressRecord {
+                        record_type: Mldv2AddressRecordType::ChangeToExcludeMode,
+                        address: "ff02::1:2".parse().unwrap(),
+                    },
+                ],
+            ),
         );
     }
 
     #[test]
     #[should_panic(expected = "checksum")]
     fn multicast_listener_packet_with_invalid_checksum_fails_do_decode() {
-        assert_eq!(
-            packet(
-                &hexstring("8f0011110000000104000000ff0200000000000000000001fff9e0c6"),
-                PseudoHeader {
-                    dest: "::".parse().unwrap(),
-                    src: "::".parse().unwrap(),
-                    length: 0
-                }
-            )
-            .unwrap(),
-            Packet::V2MulticastListenerReport
-        );
+        packet(
+            &hexstring("8f0011110000000104000000ff0200000000000000000001fff9e0c6"),
+            PseudoHeader {
+                dest: "::".parse().unwrap(),
+                src: "::".parse().unwrap(),
+                length: 0,
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -376,6 +451,32 @@ mod tests {
                 length: 0
             }),
             hexstring("870003ca00000000fe80000000000000396df66497e164f30e01d8d14717f0a0"),
+        );
+    }
+
+    #[test]
+    fn multicast_listener_packet_encodes() {
+        assert_eq!(
+            Packet::MldV2Report(
+                vec![
+                    MldV2AddressRecord {
+                        record_type: Mldv2AddressRecordType::ChangeToExcludeMode,
+                        address: "ff05::1:3".parse().unwrap(),
+                    },
+                    MldV2AddressRecord {
+                        record_type: Mldv2AddressRecordType::ChangeToExcludeMode,
+                        address: "ff02::1:2".parse().unwrap(),
+                    },
+                ],
+            ).encode(
+                PseudoHeader {
+                    dest: "ff02::16".parse().unwrap(),
+                    src: "fe80::a00:27ff:fed4:10bb".parse().unwrap(),
+                    length: 48
+                }
+            )
+            ,
+            hexstring("8f002b5a0000000204000000ff05000000000000000000000001000304000000ff020000000000000000000000010002"),
         );
     }
 }
