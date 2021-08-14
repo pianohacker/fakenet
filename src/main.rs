@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::thread;
 
 mod protocols;
+mod reactor;
 mod tap_device;
 
 #[derive(Deserialize)]
