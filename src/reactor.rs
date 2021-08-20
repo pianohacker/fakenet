@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 pub struct ScheduledHandle(usize);
 
 struct Scheduled<'a, T> {
-    handler: Rc<Box<dyn Fn(TimeReactorHandle<'a, T>) + 'a>>,
+    handler: Rc<dyn Fn(TimeReactorHandle<'a, T>) + 'a>,
     cancelled: bool,
 }
 
@@ -36,7 +36,7 @@ struct TimeReactorState<'a, T> {
     next_handle: usize,
     scheduled: HashMap<ScheduledHandle, Scheduled<'a, T>>,
     upcoming: BinaryHeap<ScheduledInstance>,
-    event_handlers: Vec<Rc<Box<dyn Fn(TimeReactorHandle<T>, &T) + 'a>>>,
+    event_handlers: Vec<Rc<dyn Fn(TimeReactorHandle<T>, &T) + 'a>>,
     running: bool,
 }
 
@@ -57,7 +57,7 @@ impl<'a, T> TimeReactorState<'a, T> {
             after_id,
             Scheduled {
                 cancelled: false,
-                handler: Rc::new(Box::new(handler)),
+                handler: Rc::new(handler),
             },
         );
 
@@ -105,7 +105,7 @@ impl<'a, T> TimeReactor<'a, T> {
     ) -> Option<(
         ScheduledInstance,
         bool,
-        Rc<Box<dyn Fn(TimeReactorHandle<'a, T>) + 'a>>,
+        Rc<dyn Fn(TimeReactorHandle<'a, T>) + 'a>,
     )> {
         {
             let state = self.state.borrow_mut();
@@ -198,7 +198,7 @@ impl<'a, T> TimeReactorHandle<'a, T> {
     pub fn on_event(&self, handler: impl Fn(TimeReactorHandle<T>, &T) + 'a) {
         let mut state = self.state.borrow_mut();
 
-        state.event_handlers.push(Rc::new(Box::new(handler)));
+        state.event_handlers.push(Rc::new(handler));
     }
 
     pub fn stop(&self) {
