@@ -1,5 +1,6 @@
 use anyhow::Result as AHResult;
 use crossbeam::channel;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 
@@ -10,6 +11,8 @@ mod packet;
 use super::ether;
 use super::ipv4;
 use super::utils::{KeyedDispatcher, RecvSenderMap};
+use crate::delay_queue::DelayQueue;
+use crate::select_queues;
 
 use self::address::address;
 pub use self::address::Address;
@@ -19,9 +22,16 @@ pub use self::packet::Packet;
 
 const _MULTICAST_ALL_NODES: Address = Address([0xff01, 0, 0, 0, 0, 0, 0, 0x1]);
 
-struct InterfaceAddress {
-    address: Address,
-    tentative: bool,
+#[derive(Clone, Copy, Debug)]
+enum InterfaceAddressState {
+    New,
+    Tentative,
+    Valid,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InterfaceAddressInfo {
+    state: InterfaceAddressState,
 }
 
 struct Actor {
@@ -29,7 +39,7 @@ struct Actor {
     incoming_receiver: channel::Receiver<ether::Frame>,
     outgoing_sender: channel::Sender<ether::Frame>,
     recv_map: Arc<RecvSenderMap<packet::Packet>>,
-    addresses: Vec<InterfaceAddress>,
+    addresses: HashMap<Address, InterfaceAddressInfo>,
 }
 
 impl Actor {
@@ -68,59 +78,85 @@ impl Actor {
         self.send_ipv6(builder.build())
     }
 
+    fn maintain_addr(&mut self, addr: &Address) -> AHResult<()> {
+        let mut addr_info = self.addresses[addr];
+
+        match addr_info.state {
+            InterfaceAddressState::New => {
+                self.send_icmpv6(
+                    "::".parse().unwrap(),
+                    "ff02::16".parse().unwrap(),
+                    icmpv6::Packet::MldV2Report(vec![
+                        icmpv6::MldV2AddressRecord {
+                            record_type: icmpv6::Mldv2AddressRecordType::ChangeToExcludeMode,
+                            address: "ff02::1".parse().unwrap(),
+                        },
+                        icmpv6::MldV2AddressRecord {
+                            record_type: icmpv6::Mldv2AddressRecordType::ChangeToExcludeMode,
+                            address: addr.solicited_nodes_multicast(),
+                        },
+                    ]),
+                )?;
+
+                self.send_icmpv6(
+                    "::".parse().unwrap(),
+                    addr.solicited_nodes_multicast(),
+                    icmpv6::Packet::NeighborSolicitation {
+                        dest: *addr,
+                        options: vec![],
+                    },
+                )?;
+
+                addr_info.state = InterfaceAddressState::Tentative;
+            }
+            _ => {}
+        };
+
+        self.addresses.insert(*addr, addr_info);
+
+        Ok(())
+    }
+
     fn run(&mut self) {
         let mut rng = rand::thread_rng();
+
+        let mut addr_maint_queue = DelayQueue::new();
+
         let link_local_address = Address::random(&mut rng)
             .suffix(64)
             .combine_subnet(&("fe80::".parse().unwrap()));
 
-        thread::sleep(std::time::Duration::from_millis(500));
-
-        self.send_icmpv6(
-            "::".parse().unwrap(),
-            "ff02::16".parse().unwrap(),
-            icmpv6::Packet::MldV2Report(vec![
-                icmpv6::MldV2AddressRecord {
-                    record_type: icmpv6::Mldv2AddressRecordType::ChangeToExcludeMode,
-                    address: "ff02::1".parse().unwrap(),
-                },
-                icmpv6::MldV2AddressRecord {
-                    record_type: icmpv6::Mldv2AddressRecordType::ChangeToExcludeMode,
-                    address: link_local_address.solicited_nodes_multicast(),
-                },
-            ]),
-        )
-        .unwrap();
-
-        self.send_icmpv6(
-            "::".parse().unwrap(),
-            link_local_address.solicited_nodes_multicast(),
-            icmpv6::Packet::NeighborSolicitation {
-                dest: link_local_address,
-                options: vec![],
+        self.addresses.insert(
+            link_local_address,
+            InterfaceAddressInfo {
+                state: InterfaceAddressState::New,
             },
-        )
-        .unwrap();
+        );
+
+        addr_maint_queue.push_after(std::time::Duration::from_millis(500), link_local_address);
 
         loop {
-            let frame = self.incoming_receiver.recv().unwrap();
+            select_queues! {
+                recv_queue(addr_maint_queue) -> addr => self.maintain_addr(&addr.unwrap()).unwrap(),
+                recv(self.incoming_receiver) -> frame => {
+                    let packet = packet::packet(&frame.unwrap().payload).unwrap();
 
-            let packet = packet::packet(&frame.payload).unwrap();
+                    if packet.next_header != packet::NextHeader::Protocol(ipv4::ProtocolNumber::Ipv6Icmp) {
+                        self.recv_map.dispatch(packet).unwrap();
+                        continue;
+                    }
 
-            if packet.next_header != packet::NextHeader::Protocol(ipv4::ProtocolNumber::Ipv6Icmp) {
-                self.recv_map.dispatch(packet).unwrap();
-                continue;
-            }
-
-            let _icmpv6_packet = icmpv6::packet(
-                &packet.payload,
-                icmpv6::PseudoHeader {
-                    src: packet.src,
-                    dest: packet.dest,
-                    length: packet.payload.len() as u32,
+                    let _icmpv6_packet = icmpv6::packet(
+                        &packet.payload,
+                        icmpv6::PseudoHeader {
+                            src: packet.src,
+                            dest: packet.dest,
+                            length: packet.payload.len() as u32,
+                        },
+                    )
+                        .unwrap();
                 },
-            )
-            .unwrap();
+            }
         }
     }
 }
@@ -143,7 +179,7 @@ impl Server {
                 incoming_receiver,
                 outgoing_sender: ether_server.writer(),
                 recv_map: recv_map.clone(),
-                addresses: Vec::new(),
+                addresses: HashMap::new(),
             }),
             recv_map,
         })
