@@ -7,7 +7,6 @@ use std::thread;
 
 mod delay_queue;
 mod protocols;
-mod reactor;
 mod tap_device;
 
 #[derive(Deserialize)]
