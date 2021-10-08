@@ -16,7 +16,8 @@ struct Network {
 
 #[derive(Deserialize)]
 struct Node {
-    address: String,
+    ether_address: String,
+    ipv4_address: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -42,14 +43,16 @@ fn main() -> AHResult<()> {
     .read_to_string(&mut network_config)?;
     let network: Network = toml::from_str(&network_config)?;
 
-    let mut eth = protocols::ether::TapInterface::open(network.node.address.parse()?)?;
+    let mut eth = protocols::ether::TapInterface::open(network.node.ether_address.parse()?)?;
     report(StatusMessage::InterfaceName {
         name: eth.if_name()?,
     });
 
-    let arp_server = protocols::arp::Server::new(&mut eth)?;
-    arp_server.add("10.1.0.1".parse()?);
-    arp_server.start();
+    if let Some(ipv4_address) = network.node.ipv4_address {
+        let arp_server = protocols::arp::Server::new(&mut eth)?;
+        arp_server.add(ipv4_address.parse()?);
+        arp_server.start();
+    }
 
     let mut ipv6_server = protocols::ipv6::Server::new(&mut eth)?;
     ipv6_server.start();
