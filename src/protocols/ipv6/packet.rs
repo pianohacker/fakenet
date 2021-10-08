@@ -282,11 +282,9 @@ pub fn packet(input: &[u8]) -> AHResult<Packet> {
 
             let mut extension_headers = Vec::new();
 
-            dbg!(payload_length);
             while let (new_input, Some((new_next_header, num_header_bytes, header))) =
                 extension_header(input, next_header)?
             {
-                dbg!(&new_next_header, num_header_bytes, &header);
                 payload_length -= num_header_bytes as u16;
                 extension_headers.push(header);
                 input = new_input;

@@ -249,7 +249,6 @@ impl Server for TapInterface {
 
         thread::spawn(move || loop {
             let frame = alerter_receiver.recv().unwrap();
-            eprintln!("Sending: {}", &frame);
             sender.send(frame).unwrap();
             <std::fs::File as std::io::Write>::write(&mut write_alert_write, &[1u8]).unwrap();
         });

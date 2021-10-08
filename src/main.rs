@@ -1,12 +1,13 @@
 use anyhow::Result as AHResult;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::env;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::thread;
 
 mod delay_queue;
 mod protocols;
+mod status;
 mod tap_device;
 
 #[derive(Deserialize)]
@@ -20,19 +21,6 @@ struct Node {
     ipv4_address: Option<String>,
 }
 
-#[derive(Serialize)]
-enum StatusMessage {
-    InterfaceName { name: String },
-}
-
-fn report(msg: StatusMessage) {
-    let stdout_handle = std::io::stdout();
-    let mut stdout = stdout_handle.lock();
-
-    serde_json::to_writer(&mut stdout, &msg).unwrap();
-    write!(stdout, "\n").unwrap();
-}
-
 fn main() -> AHResult<()> {
     let mut network_config = String::new();
     File::open(
@@ -44,9 +32,9 @@ fn main() -> AHResult<()> {
     let network: Network = toml::from_str(&network_config)?;
 
     let mut eth = protocols::ether::TapInterface::open(network.node.ether_address.parse()?)?;
-    report(StatusMessage::InterfaceName {
-        name: eth.if_name()?,
-    });
+    status::build("interface-name")
+        .field("name", eth.if_name()?)
+        .write();
 
     if let Some(ipv4_address) = network.node.ipv4_address {
         let arp_server = protocols::arp::Server::new(&mut eth)?;

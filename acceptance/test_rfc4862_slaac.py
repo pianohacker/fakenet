@@ -781,6 +781,14 @@ def test_5_4_2(iface):
 	assert(rfc4291_addr_arch.is_solicited_nodes_for_address(ns_packet[IPv6].dst, ns_packet[ICMPv6ND_NS].tgt))
 	rfc2464_ether_ipv6.assert_is_multicast_ether_dest(ns_packet[Ether].dst, ns_packet[IPv6].dst)
 
+	interface_status = iface.assert_status("interface-address-state")
+	assert(interface_status["address"] == ns_packet[ICMPv6ND_NS].tgt)
+	assert(interface_status["state"] == "Tentative")
+
+	interface_status = iface.assert_status("interface-address-state")
+	assert(interface_status["address"] == ns_packet[ICMPv6ND_NS].tgt)
+	assert(interface_status["state"] == "Valid")
+
 #    If the Neighbor Solicitation is going to be the first message sent
 #    from an interface after interface (re)initialization, the node SHOULD
 #    delay joining the solicited-node multicast address by a random delay

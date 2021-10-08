@@ -1,8 +1,12 @@
 use anyhow::Result as AHResult;
 use crossbeam::channel;
+use rand::Rng;
+use serde::Serialize;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 mod address;
 mod icmpv6;
@@ -13,6 +17,7 @@ use super::ipv4;
 use super::utils::{KeyedDispatcher, RecvSenderMap};
 use crate::delay_queue::DelayQueue;
 use crate::select_queues;
+use crate::status;
 
 use self::address::address;
 pub use self::address::Address;
@@ -21,8 +26,10 @@ pub use self::packet::NextHeader;
 pub use self::packet::Packet;
 
 const _MULTICAST_ALL_NODES: Address = Address([0xff01, 0, 0, 0, 0, 0, 0, 0x1]);
+const RFC4861_MAX_RTR_SOLICITATION_DELAY: Duration = Duration::from_secs(1);
+const RFC4861_RETRANS_TIMER_MS: Duration = Duration::from_secs(1);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
 enum InterfaceAddressState {
     New,
     Tentative,
@@ -30,8 +37,35 @@ enum InterfaceAddressState {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct InterfaceAddressInfo {
+struct InterfaceAddress {
+    address: Address,
     state: InterfaceAddressState,
+}
+
+impl InterfaceAddress {
+    fn new(address: Address) -> Self {
+        Self {
+            address,
+            state: InterfaceAddressState::New,
+        }
+    }
+
+    fn address(&self) -> Address {
+        self.address
+    }
+
+    fn state(&self) -> InterfaceAddressState {
+        self.state
+    }
+
+    fn set_state(&mut self, state: InterfaceAddressState) {
+        self.state = state;
+
+        status::build("interface-address-state")
+            .field("address", format!("{}", self.address))
+            .field("state", self.state)
+            .write();
+    }
 }
 
 struct Actor {
@@ -39,10 +73,28 @@ struct Actor {
     incoming_receiver: channel::Receiver<ether::Frame>,
     outgoing_sender: channel::Sender<ether::Frame>,
     recv_map: Arc<RecvSenderMap<packet::Packet>>,
-    addresses: HashMap<Address, InterfaceAddressInfo>,
+    addresses: Vec<RefCell<InterfaceAddress>>,
+    addr_maint_queue: DelayQueue<Address>,
 }
 
 impl Actor {
+    fn new(
+        src_ether: ether::Address,
+        incoming_receiver: channel::Receiver<ether::Frame>,
+        outgoing_sender: channel::Sender<ether::Frame>,
+        recv_map: Arc<RecvSenderMap<packet::Packet>>,
+    ) -> Self {
+        Self {
+            src_ether,
+            incoming_receiver,
+            outgoing_sender,
+            recv_map,
+            addresses: Vec::new(),
+
+            addr_maint_queue: DelayQueue::new(),
+        }
+    }
+
     fn send_ipv6(&self, packet: packet::Packet) -> AHResult<()> {
         self.outgoing_sender.send(ether::Frame {
             dest: packet.dest.multicast_ether_dest(),
@@ -78,10 +130,15 @@ impl Actor {
         self.send_ipv6(builder.build())
     }
 
-    fn maintain_addr(&mut self, addr: &Address) -> AHResult<()> {
-        let mut addr_info = self.addresses[addr];
+    fn maintain_addr(&mut self, addr: Address) -> AHResult<()> {
+        let mut addr_info = self
+            .addresses
+            .iter()
+            .find(|ai| ai.borrow().address() == addr)
+            .unwrap()
+            .borrow_mut();
 
-        match addr_info.state {
+        match addr_info.state() {
             InterfaceAddressState::New => {
                 self.send_icmpv6(
                     "::".parse().unwrap(),
@@ -102,17 +159,21 @@ impl Actor {
                     "::".parse().unwrap(),
                     addr.solicited_nodes_multicast(),
                     icmpv6::Packet::NeighborSolicitation {
-                        dest: *addr,
+                        dest: addr,
                         options: vec![],
                     },
                 )?;
 
-                addr_info.state = InterfaceAddressState::Tentative;
+                addr_info.set_state(InterfaceAddressState::Tentative);
+
+                self.addr_maint_queue
+                    .push_after(RFC4861_RETRANS_TIMER_MS, addr);
+            }
+            InterfaceAddressState::Tentative => {
+                addr_info.set_state(InterfaceAddressState::Valid);
             }
             _ => {}
         };
-
-        self.addresses.insert(*addr, addr_info);
 
         Ok(())
     }
@@ -120,24 +181,21 @@ impl Actor {
     fn run(&mut self) {
         let mut rng = rand::thread_rng();
 
-        let mut addr_maint_queue = DelayQueue::new();
-
         let link_local_address = Address::random(&mut rng)
             .suffix(64)
             .combine_subnet(&("fe80::".parse().unwrap()));
 
-        self.addresses.insert(
-            link_local_address,
-            InterfaceAddressInfo {
-                state: InterfaceAddressState::New,
-            },
-        );
+        self.addresses
+            .push(RefCell::new(InterfaceAddress::new(link_local_address)));
 
-        addr_maint_queue.push_after(std::time::Duration::from_millis(500), link_local_address);
+        self.addr_maint_queue.push_after(
+            rng.gen_range(Duration::ZERO..RFC4861_MAX_RTR_SOLICITATION_DELAY),
+            link_local_address,
+        );
 
         loop {
             select_queues! {
-                recv_queue(addr_maint_queue) -> addr => self.maintain_addr(&addr.unwrap()).unwrap(),
+                recv_queue(self.addr_maint_queue) -> addr => self.maintain_addr(addr.unwrap()).unwrap(),
                 recv(self.incoming_receiver) -> frame => {
                     let packet = packet::packet(&frame.unwrap().payload).unwrap();
 
@@ -174,13 +232,12 @@ impl Server {
         let recv_map = Arc::new(RecvSenderMap::new());
 
         Ok(Self {
-            actor: Some(Actor {
-                src_ether: ether_server.if_hwaddr()?,
+            actor: Some(Actor::new(
+                ether_server.if_hwaddr()?,
                 incoming_receiver,
-                outgoing_sender: ether_server.writer(),
-                recv_map: recv_map.clone(),
-                addresses: HashMap::new(),
-            }),
+                ether_server.writer(),
+                recv_map.clone(),
+            )),
             recv_map,
         })
     }
