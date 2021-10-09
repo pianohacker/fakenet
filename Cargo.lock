@@ -139,6 +139,7 @@ dependencies = [
  "crossbeam",
  "crossbeam-queue",
  "hex",
+ "lazy_static",
  "libc",
  "nix",
  "nom",

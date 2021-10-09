@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 import json
 from os import path
 import pytest
@@ -7,6 +8,19 @@ from scapy.sendrecv import sniff
 import select
 import subprocess
 
+class LazyBag(dict):
+	def __getitem__(self, idx):
+		value = {}
+		if idx in self:
+			 value = super().__getitem__(idx)
+			 if not isinstance(value, dict):
+				 return value
+
+		return LazyBag(value)
+
+	def __getattr__(self, name):
+		return self[name]
+
 class NetworkInterfaceHelper():
 	def __init__(self, iface_name, fakenet_subprocess_stdout):
 		self.interface = resolve_iface(iface_name)
@@ -15,6 +29,7 @@ class NetworkInterfaceHelper():
 		self.fakenet_subprocess_stdout = fakenet_subprocess_stdout
 		self.stdout_poll = select.poll()
 		self.stdout_poll.register(self.fakenet_subprocess_stdout, select.POLLIN)
+		self.last_status = {}
 	
 	def assert_packets(self, count, lfilter, timeout = 5):
 		packets = sniff(count = count, lfilter = lfilter, opened_socket = self.l2socket, timeout = timeout)
@@ -25,13 +40,20 @@ class NetworkInterfaceHelper():
 	def assert_packet(self, lfilter, timeout = 5):
 		return self.assert_packets(1, lfilter, timeout)[0]
 
-	def assert_status(self, t, timeout = 5):
-		events = self.stdout_poll.poll(timeout * 1000)
-		assert(events != [])
-		
-		status_msg = json.loads(self.fakenet_subprocess_stdout.readline())
-		assert status_msg['type'] == t
-		return status_msg
+	def _read_status_update(self):
+		self.status = json.loads(self.fakenet_subprocess_stdout.readline())
+
+	def assert_status(self, pred, timeout = 5):
+		deadline = datetime.now() + timedelta(seconds = timeout)
+
+		while self.stdout_poll.poll(0):
+			self._read_status_update()
+
+		while not pred(LazyBag(self.status)) and datetime.now() < deadline:
+			if self.stdout_poll.poll((deadline-datetime.now()).total_seconds()*1000):
+				self._read_status_update()
+
+		assert(pred(LazyBag(self.status)))
 
 @pytest.fixture
 def iface(pytestconfig, request):
@@ -47,11 +69,11 @@ def iface(pytestconfig, request):
 		text = True,
 	)
 
-	status_msg = json.loads(fakenet_subprocess.stdout.readline())
-	assert(status_msg["type"] == "interface-name")
+	status = json.loads(fakenet_subprocess.stdout.readline())
+	assert("interface" in status and "name" in status["interface"])
 
 	yield NetworkInterfaceHelper(
-		status_msg["name"],
+		status["interface"]["name"],
 		fakenet_subprocess.stdout,
 	)
 

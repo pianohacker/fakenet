@@ -3,7 +3,6 @@ use crossbeam::channel;
 use rand::Rng;
 use serde::Serialize;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -61,8 +60,10 @@ impl InterfaceAddress {
     fn set_state(&mut self, state: InterfaceAddressState) {
         self.state = state;
 
-        status::build("interface-address-state")
-            .field("address", format!("{}", self.address))
+        status::update()
+            .child("interface")
+            .child("addresses")
+            .child(format!("{}", self.address))
             .field("state", self.state)
             .write();
     }

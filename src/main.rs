@@ -32,7 +32,8 @@ fn main() -> AHResult<()> {
     let network: Network = toml::from_str(&network_config)?;
 
     let mut eth = protocols::ether::TapInterface::open(network.node.ether_address.parse()?)?;
-    status::build("interface-name")
+    status::update()
+        .child("interface")
         .field("name", eth.if_name()?)
         .write();
 

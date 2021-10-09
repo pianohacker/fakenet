@@ -775,19 +775,15 @@ def test_5_4_2(iface):
 #    target address.
 
 	ns_packet = iface.assert_packet(lambda p: p.nh == 58 and 'ICMPv6ND_NS' in p)
+	node_address = ns_packet[ICMPv6ND_NS].tgt
 
-	assert(any(rfc4291_addr_arch.is_solicited_nodes_for_address(r.dst, ns_packet[ICMPv6ND_NS].tgt) for r in mld_packet.records[0].iterpayloads()))
-	assert_is_link_local_address_5_3(ns_packet[ICMPv6ND_NS].tgt)
-	assert(rfc4291_addr_arch.is_solicited_nodes_for_address(ns_packet[IPv6].dst, ns_packet[ICMPv6ND_NS].tgt))
+	assert(any(rfc4291_addr_arch.is_solicited_nodes_for_address(r.dst, node_address) for r in mld_packet.records[0].iterpayloads()))
+	assert_is_link_local_address_5_3(node_address)
+	assert(rfc4291_addr_arch.is_solicited_nodes_for_address(ns_packet[IPv6].dst, node_address))
 	rfc2464_ether_ipv6.assert_is_multicast_ether_dest(ns_packet[Ether].dst, ns_packet[IPv6].dst)
 
-	interface_status = iface.assert_status("interface-address-state")
-	assert(interface_status["address"] == ns_packet[ICMPv6ND_NS].tgt)
-	assert(interface_status["state"] == "Tentative")
-
-	interface_status = iface.assert_status("interface-address-state")
-	assert(interface_status["address"] == ns_packet[ICMPv6ND_NS].tgt)
-	assert(interface_status["state"] == "Valid")
+	iface.assert_status(lambda s: s.interface.addresses[node_address].state == "Tentative")
+	iface.assert_status(lambda s: s.interface.addresses[node_address].state == "Valid")
 
 #    If the Neighbor Solicitation is going to be the first message sent
 #    from an interface after interface (re)initialization, the node SHOULD
